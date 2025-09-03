@@ -37,6 +37,7 @@ from ultralytics.nn.modules import (
     C3x,
     CBFuse,
     CBLinear,
+    C3AH,
     Classify,
     Concat,
     Conv,
@@ -69,7 +70,8 @@ from ultralytics.nn.modules import (
     HyperACE,
     DownsampleConv,
     FullPAD_Tunnel,
-    DSC3k2
+    DSC3k2,
+    DomainBiasManager,
 )
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
@@ -98,19 +100,9 @@ class BaseModel(nn.Module):
     """The BaseModel class serves as a base class for all the models in the Ultralytics YOLO family."""
 
     def forward(self, x, *args, **kwargs):
-        """
-        Perform forward pass of the model for either training or inference.
-
-        If x is a dict, calculates and returns the loss for training. Otherwise, returns predictions for inference.
-
-        Args:
-            x (torch.Tensor | dict): Input tensor for inference, or dict with image tensor and labels for training.
-            *args (Any): Variable length argument list.
-            **kwargs (Any): Arbitrary keyword arguments.
-
-        Returns:
-            (torch.Tensor): Loss if x is a dict (training), or network predictions (inference).
-        """
+        """Forward pass with optional domain specification."""
+        domain = kwargs.pop("domain_name", "default")
+        setattr(self, "current_domain_name", domain)
         if isinstance(x, dict):  # for cases of training and validating while training.
             return self.loss(x, *args, **kwargs)
         return self.predict(x, *args, **kwargs)
@@ -321,6 +313,34 @@ class DetectionModel(BaseModel):
             LOGGER.info(f"Overriding model.yaml nc={self.yaml['nc']} with nc={nc}")
             self.yaml["nc"] = nc  # override YAML value
         self.model, self.save = parse_model(deepcopy(self.yaml), ch=ch, verbose=verbose)  # model, savelist
+        # attach model reference to modules for domain bias access
+        for m in self.model.modules():
+            m.model = self
+
+        # domain bias manager setup
+        insertion_cfg = {}
+        for m in self.model.modules():
+            if "c3ah_out" not in insertion_cfg and isinstance(m, C3AH):
+                insertion_cfg["c3ah_out"] = m.cv3.conv.out_channels
+            if "hyperace_fuse" not in insertion_cfg and isinstance(m, HyperACE):
+                insertion_cfg["hyperace_fuse"] = m.cv2.conv.out_channels
+        fullpad_count = 0
+        for module in self.model:
+            if isinstance(module, FullPAD_Tunnel) and fullpad_count < 3:
+                idx = module.f[0] if isinstance(module.f, (list, tuple)) else module.f
+                src = self.model[idx]
+                ch_out = None
+                if hasattr(src, "conv") and hasattr(src.conv, "out_channels"):
+                    ch_out = src.conv.out_channels
+                elif hasattr(src, "cv2") and hasattr(src.cv2, "conv"):
+                    ch_out = src.cv2.conv.out_channels
+                elif hasattr(src, "cv3") and hasattr(src.cv3, "conv"):
+                    ch_out = src.cv3.conv.out_channels
+                elif hasattr(src, "out_channels"):
+                    ch_out = src.out_channels
+                insertion_cfg[f"fullpad_h{fullpad_count + 3}"] = ch_out
+                fullpad_count += 1
+        self.domain_bias = DomainBiasManager(insertion_cfg)
         self.names = {i: f"{i}" for i in range(self.yaml["nc"])}  # default names dict
         self.inplace = self.yaml.get("inplace", True)
         self.end2end = getattr(self.model[-1], "end2end", False)

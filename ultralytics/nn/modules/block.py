@@ -1759,7 +1759,11 @@ class C3AH(nn.Module):
         self.cv3 = Conv(2 * c_, c2, 1)  
         
     def forward(self, x):
-        return self.cv3(torch.cat((self.m(self.cv1(x)), self.cv2(x)), 1))
+        out = self.cv3(torch.cat((self.m(self.cv1(x)), self.cv2(x)), 1))
+        domain = getattr(getattr(self, "model", None), "current_domain_name", "default")
+        if hasattr(getattr(self, "model", None), "domain_bias"):
+            out = self.model.domain_bias.apply(domain, "c3ah_out", out)
+        return out
 
 class FuseModule(nn.Module):
     """
@@ -1853,7 +1857,11 @@ class HyperACE(nn.Module):
         y.extend(m(y[-1]) for m in self.m)
         y[1] = out1
         y.append(out2)
-        return self.cv2(torch.cat(y, 1))
+        out = self.cv2(torch.cat(y, 1))
+        domain = getattr(getattr(self, "model", None), "current_domain_name", "default")
+        if hasattr(getattr(self, "model", None), "domain_bias"):
+            out = self.model.domain_bias.apply(domain, "hyperace_fuse", out)
+        return out
 
 class DownsampleConv(nn.Module):
     """
@@ -1889,28 +1897,23 @@ class DownsampleConv(nn.Module):
         return self.channel_adjust(self.downsample(x))
 
 class FullPAD_Tunnel(nn.Module):
-    """
-    A gated fusion module for the Full-Pipeline Aggregation-and-Distribution (FullPAD) paradigm.
+    """Gated fusion module for the FullPAD paradigm with optional domain bias."""
 
-    This module implements a gated residual connection used to fuse features. It takes two inputs: the original
-    feature map and a correlation-enhanced feature map. It then computes `output = original + gate * enhanced`,
-    where `gate` is a learnable scalar parameter that adaptively balances the contribution of the enhanced features.
+    counter = 0
 
-    Methods:
-        forward: Performs the gated fusion of two input feature maps.
-
-    Examples:
-        >>> import torch
-        >>> model = FullPAD_Tunnel()
-        >>> original_feature = torch.randn(2, 64, 32, 32)
-        >>> enhanced_feature = torch.randn(2, 64, 32, 32)
-        >>> output = model([original_feature, enhanced_feature])
-        >>> print(output.shape)
-        torch.Size([2, 64, 32, 32])
-    """
     def __init__(self):
         super().__init__()
         self.gate = nn.Parameter(torch.tensor(0.0))
+        if FullPAD_Tunnel.counter < 3:
+            self.bias_name = f"fullpad_h{FullPAD_Tunnel.counter + 3}"
+        else:
+            self.bias_name = None
+        FullPAD_Tunnel.counter += 1
+
     def forward(self, x):
-        out = x[0] + self.gate * x[1]
+        feat = x[1]
+        if self.bias_name and hasattr(getattr(self, "model", None), "domain_bias"):
+            domain = getattr(getattr(self, "model", None), "current_domain_name", "default")
+            feat = self.model.domain_bias.apply(domain, self.bias_name, feat)
+        out = x[0] + self.gate * feat
         return out

@@ -93,6 +93,7 @@ from .transformer import (
     TransformerEncoderLayer,
     TransformerLayer,
 )
+from .domain_bias import BiasToken, DomainBiasManager
 
 __all__ = (
     "Conv",
@@ -171,5 +172,7 @@ __all__ = (
     "DownsampleConv",
     "FullPAD_Tunnel",
     "DSC3k2",
-    "DSConv"
+    "DSConv",
+    "BiasToken",
+    "DomainBiasManager",
 )
